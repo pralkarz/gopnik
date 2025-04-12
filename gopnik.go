@@ -1,11 +1,10 @@
-// TODO: Switch to `log` logging.
-
 package main
 
 import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"os/signal"
 	"regexp"
@@ -61,7 +60,7 @@ func parseRemindme(matches []string) (int, string, string, time.Time) {
 	case "month", "months":
 		targetTime = targetTime.AddDate(0, n, 0)
 	default:
-		fmt.Fprintln(os.Stderr, "Something went really wrong, we shouldn't be here.")
+		log.Println("Something went really wrong, we shouldn't be here.")
 	}
 
 	return n, units, toRemind, targetTime
@@ -80,7 +79,7 @@ func messageCreate(session *discordgo.Session, message *discordgo.MessageCreate)
 
 	r, err := regexp.Compile(`^!remindme "in (\d{1,2}) (minutes?|hours?|days?|weeks?|months?)" "(.+)"`)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "Error compiling the regular expression:", err)
+		log.Println("Error compiling the regular expression:", err)
 	}
 
 	messageMatches := r.MatchString(message.Content)
@@ -114,7 +113,7 @@ func messageCreate(session *discordgo.Session, message *discordgo.MessageCreate)
 
 	_, err = dbHandle.Exec("INSERT INTO reminders VALUES(NULL,?,?,?)", message.Author.ID, targetTime, strings.Replace(toRemind, " my ", " your ", -1))
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "Error inserting into the database:", err)
+		log.Println("Error inserting into the database:", err)
 		session.ChannelMessageSendReply(
 			message.ChannelID,
 			"Something went wrong while inserting to the DB. Check the stderr output.",
@@ -134,13 +133,13 @@ func messageCreate(session *discordgo.Session, message *discordgo.MessageCreate)
 func handleReminders(botSession *discordgo.Session, ticker *time.Ticker) {
 	for currentTime := range ticker.C {
 		if _, err := os.Stat("./reminders.db"); errors.Is(err, os.ErrNotExist) {
-			fmt.Fprintln(os.Stderr, "Database not bootstrapped yet, nothing to check.")
+			log.Println("Database not bootstrapped yet, nothing to check.")
 			continue
 		}
 
 		rows, err := dbHandle.Query("SELECT * FROM reminders")
 		if err != nil {
-			fmt.Fprintln(os.Stderr, "Error querying the rows when handling the reminders:", err)
+			log.Println("Error querying the rows when handling the reminders:", err)
 		}
 
 		rowsToDelete := []string{}
@@ -153,7 +152,7 @@ func handleReminders(botSession *discordgo.Session, ticker *time.Ticker) {
 			)
 
 			if err := rows.Scan(&id, &who, &time, &toRemind); err != nil {
-				fmt.Fprintln(os.Stderr, "Error scanning the row:", err)
+				log.Println("Error scanning the row:", err)
 			}
 
 			if currentTime.UTC().After(time) {
@@ -172,7 +171,7 @@ func handleReminders(botSession *discordgo.Session, ticker *time.Ticker) {
 			fmt.Sprintf("DELETE FROM reminders WHERE id IN (%s)", strings.Join(rowsToDelete, ",")),
 		)
 		if err != nil {
-			fmt.Fprintln(os.Stderr, "Error deleting the rows:", err)
+			log.Println("Error deleting the rows:", err)
 		}
 	}
 }
@@ -180,20 +179,20 @@ func handleReminders(botSession *discordgo.Session, ticker *time.Ticker) {
 func init() {
 	token = os.Getenv("GOPNIK_TOKEN")
 	if len(token) == 0 {
-		fmt.Fprintln(os.Stderr, "Bot token not found. Make sure to set the GOPNIK_TOKEN environment variable.")
+		log.Println("Bot token not found. Make sure to set the GOPNIK_TOKEN environment variable.")
 		os.Exit(42)
 	}
 
 	remindersChannelId = os.Getenv("REMINDERS_CHANNEL")
 	if len(remindersChannelId) == 0 {
-		fmt.Fprintln(os.Stderr, "Reminders channel ID not found. Make sure to set the REMINDERS_CHANNEL environment variable.")
+		log.Println("Reminders channel ID not found. Make sure to set the REMINDERS_CHANNEL environment variable.")
 		os.Exit(42)
 	}
 
 	var err error
 	dbHandle, err = bootstrapDb()
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "Error bootstrapping the database:", err)
+		log.Println("Error bootstrapping the database:", err)
 		os.Exit(42)
 	}
 }
@@ -203,7 +202,7 @@ func main() {
 
 	botSession, err := discordgo.New("Bot " + token)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "Error creating the bot session:", err)
+		log.Println("Error creating the bot session:", err)
 		os.Exit(42)
 	}
 
@@ -213,7 +212,7 @@ func main() {
 
 	err = botSession.Open()
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "Error opening the WebSocket connection:", err)
+		log.Println("Error opening the WebSocket connection:", err)
 		os.Exit(42)
 	}
 	defer botSession.Close()
