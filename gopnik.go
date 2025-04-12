@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math"
 	"os"
 	"os/signal"
 	"regexp"
@@ -52,7 +53,7 @@ func handlePendingReminders(es *eventState) {
 	reminders := make([]string, 0)
 	for rows.Next() {
 		var (
-			id       string
+			id       uint32
 			who      string
 			time     time.Time
 			toRemind string
@@ -62,7 +63,7 @@ func handlePendingReminders(es *eventState) {
 			log.Println("Error scanning the row:", err)
 		}
 
-		reminders = append(reminders, fmt.Sprintf("%s on <t:%d>", toRemind, time.Unix()))
+		reminders = append(reminders, fmt.Sprintf("*[ID: %d]* %s on <t:%d>", id, toRemind, time.Unix()))
 	}
 	if err = rows.Err(); err != nil {
 		log.Println("Error when iterating over the pending reminders:", err)
@@ -80,6 +81,7 @@ func handlePendingReminders(es *eventState) {
 	for idx, reminder := range reminders {
 		pendingReminders.WriteString(fmt.Sprintf("%d. Reminder %s.\n", idx+1, reminder))
 	}
+	pendingReminders.WriteString("\nTo remove a reminder, use `!rmreminder <ID>`, e.g. `!rmreminder 42`.")
 
 	es.reply(pendingReminders.String())
 }
@@ -122,6 +124,34 @@ func handleTzpreferenceRegexMatch(es *eventState, matches []string) {
 	}
 
 	es.reply("Successfully set the preference.")
+}
+
+func handleRmreminderRegexMatch(es *eventState, matches []string) {
+	id, _ := strconv.Atoi(matches[1])
+	if id > math.MaxUint32 {
+		es.reply(fmt.Sprintf("The ID is too big, has to be between 0 and %d.", math.MaxUint32))
+		return
+	}
+
+	var who string
+	err := dbHandle.QueryRow("SELECT who FROM Reminders WHERE id=?", id).Scan(&who)
+	if errors.Is(err, sql.ErrNoRows) {
+		es.reply("There isn't a reminder with that ID. Make sure you provided the correct one.")
+		return
+	}
+
+	if es.message.Author.ID != who {
+		es.reply("You cannot remove someone else's reminders!")
+		return
+	}
+
+	_, err = dbHandle.Exec("DELETE FROM Reminders WHERE id=?", id)
+	if err != nil {
+		log.Println("Error deleting the row:", err)
+		es.reply("Something went wrong while deleting the reminder. Check the stderr output.")
+	}
+
+	es.reply("Successfully deleted the reminder.")
 }
 
 func isAbsoluteInputValid(day int, month int, year int, hour int, minute int, currentYear int) (string, bool) {
@@ -347,9 +377,17 @@ func messageCreate(session *discordgo.Session, message *discordgo.MessageCreate)
 	tzpreferenceRegexCompiled := regexp.MustCompile(tzpreferenceRegex)
 
 	doesTzpreferenceRegexMatch := tzpreferenceRegexCompiled.MatchString(message.Content)
-
 	if doesTzpreferenceRegexMatch {
 		handleTzpreferenceRegexMatch(&eventState, tzpreferenceRegexCompiled.FindStringSubmatch(message.Content))
+		return
+	}
+
+	const rmreminderRegex = `^!rmreminder (\d+)$`
+	rmreminderRegexCompiled := regexp.MustCompile(rmreminderRegex)
+
+	doesRmrreminderRegexMatch := rmreminderRegexCompiled.MatchString(message.Content)
+	if doesRmrreminderRegexMatch {
+		handleRmreminderRegexMatch(&eventState, rmreminderRegexCompiled.FindStringSubmatch(message.Content))
 		return
 	}
 
