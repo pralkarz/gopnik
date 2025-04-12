@@ -179,21 +179,18 @@ func handleReminders(botSession *discordgo.Session, ticker *time.Ticker) {
 func init() {
 	token = os.Getenv("GOPNIK_TOKEN")
 	if len(token) == 0 {
-		log.Println("Bot token not found. Make sure to set the GOPNIK_TOKEN environment variable.")
-		os.Exit(42)
+		log.Fatalln("Bot token not found. Make sure to set the GOPNIK_TOKEN environment variable.")
 	}
 
 	remindersChannelId = os.Getenv("REMINDERS_CHANNEL")
 	if len(remindersChannelId) == 0 {
-		log.Println("Reminders channel ID not found. Make sure to set the REMINDERS_CHANNEL environment variable.")
-		os.Exit(42)
+		log.Fatalln("Reminders channel ID not found. Make sure to set the REMINDERS_CHANNEL environment variable.")
 	}
 
 	var err error
 	dbHandle, err = bootstrapDb()
 	if err != nil {
-		log.Println("Error bootstrapping the database:", err)
-		os.Exit(42)
+		log.Fatalln("Error bootstrapping the database:", err)
 	}
 }
 
@@ -202,8 +199,7 @@ func main() {
 
 	botSession, err := discordgo.New("Bot " + token)
 	if err != nil {
-		log.Println("Error creating the bot session:", err)
-		os.Exit(42)
+		log.Fatalln("Error creating the bot session:", err)
 	}
 
 	botSession.AddHandler(messageCreate)
@@ -212,8 +208,7 @@ func main() {
 
 	err = botSession.Open()
 	if err != nil {
-		log.Println("Error opening the WebSocket connection:", err)
-		os.Exit(42)
+		log.Fatalln("Error opening the WebSocket connection:", err)
 	}
 	defer botSession.Close()
 
