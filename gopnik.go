@@ -215,7 +215,13 @@ func handleAbsoluteRegexMatch(es *eventState, matches []string) {
 }
 
 func parseRelativeRemindme(matches []string) (int, string, string, time.Time) {
-	n, _ := strconv.Atoi(matches[1])
+	var n int
+	if matches[1] == "a" || matches[1] == "an" {
+		n = 1
+	} else {
+		n, _ = strconv.Atoi(matches[1])
+	}
+
 	units, toRemind := matches[2], matches[3]
 
 	targetTime := time.Now().UTC()
@@ -249,14 +255,15 @@ func handleRelativeRegexMatch(es *eventState, matches []string) {
 		return
 	}
 
-	_, err := dbHandle.Exec("INSERT INTO reminders VALUES(NULL,?,?,?)", es.message.Author.ID, targetTime, strings.Replace(toRemind, " my ", " your ", -1))
+	parsedToRemind := strings.Replace(toRemind, " my ", " your ", -1)
+	_, err := dbHandle.Exec("INSERT INTO reminders VALUES(NULL,?,?,?)", es.message.Author.ID, targetTime, parsedToRemind)
 	if err != nil {
 		log.Println("Error inserting into the database:", err)
 		es.reply("Something went wrong while inserting to the DB. Check the stderr output.")
 		return
 	}
 
-	es.reply(fmt.Sprintf("Successfully added to the database. I'll remind you in %d %s.", n, units))
+	es.reply(fmt.Sprintf("Successfully added to the database. I'll remind you in %d %s %s.", n, units, parsedToRemind))
 }
 
 func messageCreate(session *discordgo.Session, message *discordgo.MessageCreate) {
@@ -278,7 +285,7 @@ func messageCreate(session *discordgo.Session, message *discordgo.MessageCreate)
 	}
 
 	const absoluteRemindmeRegex = `^!remindme on (\d{1,2})\.(\d{1,2})(?:\.(\d{4}))? at (\d{1,2})(?::(\d{1,2}))? (AM|PM) ?([a-zA-Z]+\/[a-zA-Z_]+)? (.+)`
-	const relativeRemindmeRegex = `^!remindme in (\d{1,2}) (minutes?|hours?|days?|weeks?|months?) (.+)`
+	const relativeRemindmeRegex = `^!remindme in (\d{1,2}|an?) (minutes?|hours?|days?|weeks?|months?) (.+)`
 
 	absoluteRemindmeRegexCompiled := regexp.MustCompile(absoluteRemindmeRegex)
 	relativeRemindmeRegexCompiled := regexp.MustCompile(relativeRemindmeRegex)
