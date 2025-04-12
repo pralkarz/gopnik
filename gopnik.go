@@ -332,6 +332,10 @@ func messageCreate(session *discordgo.Session, message *discordgo.MessageCreate)
 		return
 	}
 
+	if !strings.HasPrefix("!", message.Content) {
+		return
+	}
+
 	eventState := eventState{session, message}
 
 	if message.Content == "!reminders" {
