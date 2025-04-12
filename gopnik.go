@@ -23,27 +23,142 @@ var (
 	dbHandle           *sql.DB
 )
 
-func bootstrapDb() (*sql.DB, error) {
-	db, err := sql.Open("sqlite3", "reminders.db")
-	if err != nil {
-		return db, err
+func isLeapYear(year int) bool {
+	if year%400 == 0 {
+		return true
 	}
 
-	_, err = db.Exec(`
-		CREATE TABLE IF NOT EXISTS reminders (
-			id INTEGER NOT NULL PRIMARY KEY,
-			who TEXT NOT NULL,
-			time DATETIME NOT NULL,
-			toRemind TEXT NOT NULL
-		);`)
-	if err != nil {
-		return db, err
-	}
-
-	return db, nil
+	return year%4 == 0 && year%100 != 0
 }
 
-func parseRemindme(matches []string) (int, string, string, time.Time) {
+func isAbsoluteInputValid(day int, month int, year int, hour int, minute int, currentYear int) (string, bool) {
+	// Validate day and month.
+	if day == 0 || day > 31 {
+		return fmt.Sprintf("No month has %d days you silly goose.", day), false
+	} else if month == 0 {
+		return "There is no 0th month my dear pumpkin.", false
+	} else if month > 12 {
+		return "There aren't that many months!", false
+	} else {
+		daysInMonths := [12]int{31, 0, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31}
+
+		if isLeapYear(year) {
+			daysInMonths[1] = 29
+		} else {
+			daysInMonths[1] = 28
+		}
+
+		if day > daysInMonths[month-1] {
+			return fmt.Sprintf("There aren't %d days in this month.", day), false
+		}
+	}
+
+	// Validate year.
+	difference := year - currentYear
+	if difference < 0 || difference > 1 {
+		return fmt.Sprintf("The year has to be either %d or %d.", currentYear, currentYear+1), false
+	}
+
+	// Validate hour.
+	if hour == 0 || hour > 12 {
+		return "The time has to follow the [12-hour clock](https://en.wikipedia.org/wiki/12-hour_clock).", false
+	}
+
+	// Validate minute.
+	if minute > 59 {
+		return "Are you sure you understand the clock?", false
+	}
+
+	return "", true
+}
+
+func handleAbsoluteRegexMatch(session *discordgo.Session, message *discordgo.MessageCreate, matches []string) {
+	currentTime := time.Now()
+	currentYear := currentTime.Year()
+
+	day, _ := strconv.Atoi(matches[1])
+	month, _ := strconv.Atoi(matches[2])
+
+	var year int
+	if len(matches[3]) > 0 {
+		year, _ = strconv.Atoi(matches[3])
+	} else {
+		year = currentYear
+	}
+
+	hour, _ := strconv.Atoi(matches[4])
+
+	var minute int
+	if len(matches[5]) > 0 {
+		minute, _ = strconv.Atoi(matches[5])
+	} else {
+		minute = 0
+	}
+
+	if errMsg, ok := isAbsoluteInputValid(day, month, year, hour, minute, currentYear); !ok {
+		session.ChannelMessageSendReply(message.ChannelID, errMsg, message.Reference())
+
+		return
+	}
+
+	period, toRemind := matches[6], matches[7]
+
+	// Hour in the 12-hour format is needed later for the information for the user,
+	// but the database expects the 24-hour format.
+	dbHour := hour
+	if period == "AM" && hour == 12 {
+		dbHour = 0
+	} else if period == "PM" && hour < 12 {
+		dbHour += 12
+	}
+
+	targetTime, err := time.ParseInLocation(
+		time.DateTime,
+		fmt.Sprintf("%d-%02d-%02d %02d:%02d:%02d", year, month, day, dbHour, minute, 0),
+		currentTime.Location(),
+	)
+	if err != nil {
+		log.Println("Error parsing the time:", err)
+		session.ChannelMessageSendReply(
+			message.ChannelID,
+			"Something went wrong while parsing the time. Check the stderr output.",
+			message.Reference(),
+		)
+
+		return
+	}
+
+	targetTime = targetTime.UTC()
+	if targetTime.Before(currentTime) {
+		session.ChannelMessageSendReply(
+			message.ChannelID,
+			"The date cannot be in the past, who would've guessed?",
+			message.Reference(),
+		)
+
+		return
+	}
+
+	_, err = dbHandle.Exec("INSERT INTO reminders VALUES(NULL,?,?,?)", message.Author.ID, targetTime, strings.Replace(toRemind, " my ", " your ", -1))
+	if err != nil {
+		log.Println("Error inserting into the database:", err)
+		session.ChannelMessageSendReply(
+			message.ChannelID,
+			"Something went wrong while inserting to the DB. Check the stderr output.",
+			message.Reference(),
+		)
+
+		return
+	}
+
+	session.ChannelMessageSendReply(
+		message.ChannelID,
+		fmt.Sprintf("Successfully added to the database. I'll remind you on %02d.%02d.%d at %02d:%02d %s.", day, month, year, hour, minute, period),
+		message.Reference(),
+	)
+}
+
+func parseRelativeRemindme(matches []string) (int, string, string, time.Time) {
 	n, _ := strconv.Atoi(matches[1])
 	units, toRemind := matches[2], matches[3]
 
@@ -66,43 +181,8 @@ func parseRemindme(matches []string) (int, string, string, time.Time) {
 	return n, units, toRemind, targetTime
 }
 
-func messageCreate(session *discordgo.Session, message *discordgo.MessageCreate) {
-	// Ignore the bot's own messages.
-	if message.Author.ID == session.State.User.ID {
-		return
-	}
-
-	// Ignore other bots' shenanigans.
-	if message.Author.Bot {
-		return
-	}
-
-	const remindmeRegex = `^!remindme in (\d{1,2}) (minutes?|hours?|days?|weeks?|months?) (.+)`
-
-	r, err := regexp.Compile(remindmeRegex)
-	if err != nil {
-		log.Println("Error compiling the regular expression:", err)
-	}
-
-	messageMatches := r.MatchString(message.Content)
-
-	if strings.HasPrefix(message.Content, "!remindme") && !messageMatches {
-		session.ChannelMessageSendReply(
-			message.ChannelID,
-			"Invalid !remindme syntax. Has to match the regex `"+
-				remindmeRegex+
-				"`, e.g. `!remindme in 2 days to buy a gift for Chris`.",
-			message.Reference(),
-		)
-
-		return
-	}
-
-	if !messageMatches {
-		return
-	}
-
-	n, units, toRemind, targetTime := parseRemindme(r.FindStringSubmatch(message.Content))
+func handleRelativeRegexMatch(session *discordgo.Session, message *discordgo.MessageCreate, matches []string) {
+	n, units, toRemind, targetTime := parseRelativeRemindme(matches)
 	if n == 0 {
 		session.ChannelMessageSendReply(
 			message.ChannelID,
@@ -113,7 +193,7 @@ func messageCreate(session *discordgo.Session, message *discordgo.MessageCreate)
 		return
 	}
 
-	_, err = dbHandle.Exec("INSERT INTO reminders VALUES(NULL,?,?,?)", message.Author.ID, targetTime, strings.Replace(toRemind, " my ", " your ", -1))
+	_, err := dbHandle.Exec("INSERT INTO reminders VALUES(NULL,?,?,?)", message.Author.ID, targetTime, strings.Replace(toRemind, " my ", " your ", -1))
 	if err != nil {
 		log.Println("Error inserting into the database:", err)
 		session.ChannelMessageSendReply(
@@ -130,6 +210,53 @@ func messageCreate(session *discordgo.Session, message *discordgo.MessageCreate)
 		fmt.Sprintf("Successfully added to the database. I'll remind you in %d %s.", n, units),
 		message.Reference(),
 	)
+}
+
+func messageCreate(session *discordgo.Session, message *discordgo.MessageCreate) {
+	// Ignore the bot's own messages.
+	if message.Author.ID == session.State.User.ID {
+		return
+	}
+
+	// Ignore other bots' shenanigans.
+	if message.Author.Bot {
+		return
+	}
+
+	const absoluteRemindmeRegex = `^!remindme on (\d{1,2})\.(\d{1,2})(?:\.(\d{4}))? at (\d{1,2})(?::(\d{1,2}))? (AM|PM) (.+)`
+	const relativeRemindmeRegex = `^!remindme in (\d{1,2}) (minutes?|hours?|days?|weeks?|months?) (.+)`
+
+	absoluteRemindmeRegexCompiled := regexp.MustCompile(absoluteRemindmeRegex)
+	relativeRemindmeRegexCompiled := regexp.MustCompile(relativeRemindmeRegex)
+
+	doesAbsoluteRegexMatch := absoluteRemindmeRegexCompiled.MatchString(message.Content)
+	doesRelativeRegexMatch := relativeRemindmeRegexCompiled.MatchString(message.Content)
+
+	if strings.HasPrefix(message.Content, "!remindme") && !doesAbsoluteRegexMatch && !doesRelativeRegexMatch {
+		session.ChannelMessageSendReply(
+			message.ChannelID,
+			"Invalid `!remindme` syntax. Has to match either of these regexes:\n"+
+				fmt.Sprintf("`%s`\n", absoluteRemindmeRegex)+
+				fmt.Sprintf("`%s`\n\n", relativeRemindmeRegex)+
+				"For example:\n"+
+				"`!remindme on 23.12 at 12 PM that Christmas is tomorrow`\n"+
+				"`!remindme in 2 days to buy a gift for Aurora`",
+			message.Reference(),
+		)
+
+		return
+	}
+
+	if !doesAbsoluteRegexMatch && !doesRelativeRegexMatch {
+		return
+	}
+
+	if doesAbsoluteRegexMatch {
+		handleAbsoluteRegexMatch(session, message, absoluteRemindmeRegexCompiled.FindStringSubmatch(message.Content))
+		return
+	}
+
+	handleRelativeRegexMatch(session, message, relativeRemindmeRegexCompiled.FindStringSubmatch(message.Content))
 }
 
 func handleReminders(botSession *discordgo.Session, ticker *time.Ticker) {
@@ -176,6 +303,26 @@ func handleReminders(botSession *discordgo.Session, ticker *time.Ticker) {
 			log.Println("Error deleting the rows:", err)
 		}
 	}
+}
+
+func bootstrapDb() (*sql.DB, error) {
+	db, err := sql.Open("sqlite3", "reminders.db")
+	if err != nil {
+		return db, err
+	}
+
+	_, err = db.Exec(`
+		CREATE TABLE IF NOT EXISTS reminders (
+			id INTEGER NOT NULL PRIMARY KEY,
+			who TEXT NOT NULL,
+			time DATETIME NOT NULL,
+			toRemind TEXT NOT NULL
+		);`)
+	if err != nil {
+		return db, err
+	}
+
+	return db, nil
 }
 
 func init() {
