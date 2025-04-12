@@ -202,7 +202,7 @@ func handleAbsoluteRegexMatch(es *eventState, matches []string) {
 		return
 	}
 
-	_, err = dbHandle.Exec("INSERT INTO reminders VALUES(NULL,?,?,?)", es.message.Author.ID, targetTime, strings.Replace(toRemind, " my ", " your ", -1))
+	_, err = dbHandle.Exec("INSERT INTO Reminders VALUES(NULL,?,?,?)", es.message.Author.ID, targetTime, strings.Replace(toRemind, " my ", " your ", -1))
 	if err != nil {
 		log.Println("Error inserting into the database:", err)
 		es.reply("Something went wrong while inserting to the DB. Check the stderr output.")
@@ -256,7 +256,7 @@ func handleRelativeRegexMatch(es *eventState, matches []string) {
 	}
 
 	parsedToRemind := strings.Replace(toRemind, " my ", " your ", -1)
-	_, err := dbHandle.Exec("INSERT INTO reminders VALUES(NULL,?,?,?)", es.message.Author.ID, targetTime, parsedToRemind)
+	_, err := dbHandle.Exec("INSERT INTO Reminders VALUES(NULL,?,?,?)", es.message.Author.ID, targetTime, parsedToRemind)
 	if err != nil {
 		log.Println("Error inserting into the database:", err)
 		es.reply("Something went wrong while inserting to the DB. Check the stderr output.")
@@ -376,7 +376,7 @@ func bootstrapDb() (*sql.DB, error) {
 	}
 
 	_, err = db.Exec(`
-		CREATE TABLE IF NOT EXISTS reminders (
+		CREATE TABLE IF NOT EXISTS Reminders (
 			id INTEGER NOT NULL PRIMARY KEY,
 			who TEXT NOT NULL,
 			time DATETIME NOT NULL,
