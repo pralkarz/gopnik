@@ -115,7 +115,7 @@ func handleAbsoluteRegexMatch(session *discordgo.Session, message *discordgo.Mes
 	targetTime, err := time.ParseInLocation(
 		time.DateTime,
 		fmt.Sprintf("%d-%02d-%02d %02d:%02d:%02d", year, month, day, dbHour, minute, 0),
-		message.Timestamp.Location(),
+		currentTime.Location(),
 	)
 	if err != nil {
 		log.Println("Error parsing the time:", err)
