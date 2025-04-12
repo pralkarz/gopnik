@@ -332,7 +332,7 @@ func messageCreate(session *discordgo.Session, message *discordgo.MessageCreate)
 		return
 	}
 
-	if !strings.HasPrefix("!", message.Content) {
+	if !strings.HasPrefix(message.Content, "!") {
 		return
 	}
 
