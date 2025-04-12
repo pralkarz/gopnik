@@ -31,6 +31,69 @@ func isLeapYear(year int) bool {
 	return year%4 == 0 && year%100 != 0
 }
 
+func handlePendingReminders(session *discordgo.Session, message *discordgo.MessageCreate) {
+	rows, err := dbHandle.Query("SELECT * FROM reminders WHERE who=?", message.Author.ID)
+	if err != nil {
+		log.Println("Error querying the pending reminders:", err)
+		session.ChannelMessageSendReply(
+			message.ChannelID,
+			"Something went wrong while querying the pending reminders. Check the stderr output.",
+			message.Reference(),
+		)
+
+		return
+	}
+	defer rows.Close()
+
+	reminders := make([]string, 0)
+	for rows.Next() {
+		var (
+			id       string
+			who      string
+			time     time.Time
+			toRemind string
+		)
+
+		if err := rows.Scan(&id, &who, &time, &toRemind); err != nil {
+			log.Println("Error scanning the row:", err)
+		}
+
+		reminders = append(reminders, fmt.Sprintf("%s on <t:%d>", toRemind, time.Unix()))
+	}
+	if err = rows.Err(); err != nil {
+		log.Println("Error when iterating over the pending reminders:", err)
+		session.ChannelMessageSendReply(
+			message.ChannelID,
+			"Something went wrong while iterating over the pending reminders. Check the stderr output.",
+			message.Reference(),
+		)
+
+		return
+	}
+
+	if len(reminders) == 0 {
+		session.ChannelMessageSendReply(
+			message.ChannelID,
+			"You have no pending reminders.",
+			message.Reference(),
+		)
+
+		return
+	}
+
+	var pendingReminders strings.Builder
+	pendingReminders.WriteString("You have the following pending reminders:\n")
+	for idx, reminder := range reminders {
+		pendingReminders.WriteString(fmt.Sprintf("%d. Reminder %s.\n", idx+1, reminder))
+	}
+
+	session.ChannelMessageSendReply(
+		message.ChannelID,
+		pendingReminders.String(),
+		message.Reference(),
+	)
+}
+
 func isAbsoluteInputValid(day int, month int, year int, hour int, minute int, currentYear int) (string, bool) {
 	// Validate day and month.
 	if day == 0 || day > 31 {
@@ -117,7 +180,6 @@ func handleAbsoluteRegexMatch(session *discordgo.Session, message *discordgo.Mes
 
 	if errMsg, ok := isAbsoluteInputValid(day, month, year, hour, minute, currentYear); !ok {
 		session.ChannelMessageSendReply(message.ChannelID, errMsg, message.Reference())
-
 		return
 	}
 
@@ -244,6 +306,11 @@ func messageCreate(session *discordgo.Session, message *discordgo.MessageCreate)
 
 	// Ignore other bots' shenanigans.
 	if message.Author.Bot {
+		return
+	}
+
+	if message.Content == "!reminders" {
+		handlePendingReminders(session, message)
 		return
 	}
 
