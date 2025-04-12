@@ -24,6 +24,12 @@ var (
 	dbHandle           *sql.DB
 )
 
+type rowToUpdate struct {
+	id      string
+	newTime time.Time
+	who     string
+}
+
 type eventState struct {
 	session *discordgo.Session
 	message *discordgo.MessageCreate
@@ -53,17 +59,22 @@ func handlePendingReminders(es *eventState) {
 	reminders := make([]string, 0)
 	for rows.Next() {
 		var (
-			id       uint32
-			who      string
-			time     time.Time
-			toRemind string
+			id        uint32
+			who       string
+			time      time.Time
+			toRemind  string
+			recurring bool
 		)
 
-		if err := rows.Scan(&id, &who, &time, &toRemind); err != nil {
+		if err := rows.Scan(&id, &who, &time, &toRemind, &recurring); err != nil {
 			log.Println("Error scanning the row:", err)
 		}
 
-		reminders = append(reminders, fmt.Sprintf("*[ID: %d]* %s on <t:%d>", id, toRemind, time.Unix()))
+		if recurring {
+			reminders = append(reminders, fmt.Sprintf("*[ID: %d]* %s every day, next time on <t:%d>", id, toRemind, time.Unix()))
+		} else {
+			reminders = append(reminders, fmt.Sprintf("*[ID: %d]* %s on <t:%d>", id, toRemind, time.Unix()))
+		}
 	}
 	if err = rows.Err(); err != nil {
 		log.Println("Error when iterating over the pending reminders:", err)
@@ -154,7 +165,7 @@ func handleRmreminderRegexMatch(es *eventState, matches []string) {
 	es.reply("Successfully deleted the reminder.")
 }
 
-func isAbsoluteInputValid(day int, month int, year int, hour int, minute int, currentYear int) (string, bool) {
+func isAbsoluteDateValid(day int, month int, year int, hour int, minute int, currentYear int) (string, bool) {
 	// Validate day and month.
 	if day == 0 || day > 31 {
 		return fmt.Sprintf("No month has %d days you silly goose.", day), false
@@ -254,7 +265,7 @@ func handleAbsoluteRegexMatch(es *eventState, matches []string) {
 		minute = 0
 	}
 
-	if errMsg, ok := isAbsoluteInputValid(day, month, year, hour, minute, currentYear); !ok {
+	if errMsg, ok := isAbsoluteDateValid(day, month, year, hour, minute, currentYear); !ok {
 		es.reply(errMsg)
 		return
 	}
@@ -287,7 +298,7 @@ func handleAbsoluteRegexMatch(es *eventState, matches []string) {
 		return
 	}
 
-	_, err = dbHandle.Exec("INSERT INTO Reminders VALUES(NULL,?,?,?)", es.message.Author.ID, targetTime, strings.Replace(toRemind, " my ", " your ", -1))
+	_, err = dbHandle.Exec("INSERT INTO Reminders VALUES(NULL,?,?,?,0)", es.message.Author.ID, targetTime, strings.Replace(toRemind, " my ", " your ", -1))
 	if err != nil {
 		log.Println("Error inserting into the database:", err)
 		es.reply("Something went wrong while inserting to the DB. Check the stderr output.")
@@ -341,7 +352,7 @@ func handleRelativeRegexMatch(es *eventState, matches []string) {
 	}
 
 	parsedToRemind := strings.Replace(toRemind, " my ", " your ", -1)
-	_, err := dbHandle.Exec("INSERT INTO Reminders VALUES(NULL,?,?,?)", es.message.Author.ID, targetTime, parsedToRemind)
+	_, err := dbHandle.Exec("INSERT INTO Reminders VALUES(NULL,?,?,?,0)", es.message.Author.ID, targetTime, parsedToRemind)
 	if err != nil {
 		log.Println("Error inserting into the database:", err)
 		es.reply("Something went wrong while inserting to the DB. Check the stderr output.")
@@ -349,6 +360,74 @@ func handleRelativeRegexMatch(es *eventState, matches []string) {
 	}
 
 	es.reply(fmt.Sprintf("Successfully added to the database. I'll remind you in %d %s %s.", n, units, parsedToRemind))
+}
+
+func handleRecurringRegexMatch(es *eventState, matches []string) {
+	toRemind := matches[5]
+	if len(toRemind) > 1500 {
+		es.reply("The maximum reminder length is 1500 characters, you naughty person.")
+		return
+	}
+
+	location, err := resolveLocation(es, matches[4])
+	if err != nil {
+		log.Println("Error resolving the location:", err)
+		es.reply("Couldn't resolve your location. Make sure you spelled it correctly or check the stderr output.")
+		return
+	}
+
+	currentTime := time.Now().In(location)
+
+	hour, _ := strconv.Atoi(matches[1])
+
+	var minute int
+	if len(matches[2]) > 0 {
+		minute, _ = strconv.Atoi(matches[2])
+	} else {
+		minute = 0
+	}
+
+	if errMsg, ok := isAbsoluteDateValid(currentTime.Day(), int(currentTime.Month()), currentTime.Year(), hour, minute, currentTime.Year()); !ok {
+		es.reply(errMsg)
+		return
+	}
+
+	period := matches[3]
+	// Hour in the 12-hour format is needed later for the information for the user,
+	// but the database expects the 24-hour format.
+	dbHour := hour
+	if period == "AM" && hour == 12 {
+		dbHour = 0
+	} else if period == "PM" && hour < 12 {
+		dbHour += 12
+	}
+
+	targetTime, err := time.ParseInLocation(
+		time.DateTime,
+		fmt.Sprintf("%d-%02d-%02d %02d:%02d:%02d", currentTime.Year(), currentTime.Month(), currentTime.Day(), dbHour, minute, 0),
+		location,
+	)
+	if err != nil {
+		log.Println("Error parsing the time:", err)
+		es.reply("Something went wrong while parsing the time. Check the stderr output.")
+		return
+	}
+
+	targetTime = targetTime.UTC()
+	if targetTime.Before(currentTime.UTC()) {
+		targetTime = targetTime.AddDate(0, 0, 1)
+	}
+
+	_, err = dbHandle.Exec("INSERT INTO Reminders VALUES(NULL,?,?,?,1)", es.message.Author.ID, targetTime, strings.Replace(toRemind, " my ", " your ", -1))
+	if err != nil {
+		log.Println("Error inserting into the database:", err)
+		es.reply("Something went wrong while inserting to the DB. Check the stderr output.")
+		return
+	}
+
+	reply := fmt.Sprintf("Successfully added to the database. I'll remind you %s every day at %02d:%02d %s in the %s timezone.",
+		toRemind, hour, minute, period, location.String())
+	es.reply(strings.Replace(reply, " my ", " your ", -1))
 }
 
 func messageCreate(session *discordgo.Session, message *discordgo.MessageCreate) {
@@ -393,14 +472,17 @@ func messageCreate(session *discordgo.Session, message *discordgo.MessageCreate)
 
 	const absoluteRemindmeRegex = `^!remindme on (\d{1,2})\.(\d{1,2})(?:\.(\d{4}))? at (\d{1,2})(?::(\d{1,2}))? (AM|PM) ?([a-zA-Z]+\/[a-zA-Z_]+)? (.+)`
 	const relativeRemindmeRegex = `^!remindme in (\d{1,2}|an?) (minutes?|hours?|days?|weeks?|months?) (.+)`
+	const recurringRemindmeRegex = `^!remindme every day at (\d{1,2})(?::(\d{1,2}))? (AM|PM) ?([a-zA-Z]+\/[a-zA-Z_]+)? (.+)`
 
 	absoluteRemindmeRegexCompiled := regexp.MustCompile(absoluteRemindmeRegex)
 	relativeRemindmeRegexCompiled := regexp.MustCompile(relativeRemindmeRegex)
+	recurringRemindmeRegexCompiled := regexp.MustCompile(recurringRemindmeRegex)
 
 	doesAbsoluteRegexMatch := absoluteRemindmeRegexCompiled.MatchString(message.Content)
 	doesRelativeRegexMatch := relativeRemindmeRegexCompiled.MatchString(message.Content)
+	doesRecurringRegexMatch := recurringRemindmeRegexCompiled.MatchString(message.Content)
 
-	if strings.HasPrefix(message.Content, "!remindme") && !doesAbsoluteRegexMatch && !doesRelativeRegexMatch {
+	if strings.HasPrefix(message.Content, "!remindme") && !doesAbsoluteRegexMatch && !doesRelativeRegexMatch && !doesRecurringRegexMatch {
 		eventState.reply(
 			"Invalid `!remindme` syntax. Has to match either of these regexes:\n" +
 				fmt.Sprintf("`%s`\n", absoluteRemindmeRegex) +
@@ -421,7 +503,7 @@ func messageCreate(session *discordgo.Session, message *discordgo.MessageCreate)
 		return
 	}
 
-	if !doesAbsoluteRegexMatch && !doesRelativeRegexMatch {
+	if !doesAbsoluteRegexMatch && !doesRelativeRegexMatch && !doesRecurringRegexMatch {
 		return
 	}
 
@@ -430,7 +512,12 @@ func messageCreate(session *discordgo.Session, message *discordgo.MessageCreate)
 		return
 	}
 
-	handleRelativeRegexMatch(&eventState, relativeRemindmeRegexCompiled.FindStringSubmatch(message.Content))
+	if doesRelativeRegexMatch {
+		handleRelativeRegexMatch(&eventState, relativeRemindmeRegexCompiled.FindStringSubmatch(message.Content))
+		return
+	}
+
+	handleRecurringRegexMatch(&eventState, recurringRemindmeRegexCompiled.FindStringSubmatch(message.Content))
 }
 
 func handleReminders(botSession *discordgo.Session, ticker *time.Ticker) {
@@ -446,24 +533,33 @@ func handleReminders(botSession *discordgo.Session, ticker *time.Ticker) {
 		}
 
 		rowsToDelete := []string{}
+		rowsToUpdate := []rowToUpdate{}
 		for rows.Next() {
 			var (
-				id       string
-				who      string
-				time     time.Time
-				toRemind string
+				id        string
+				who       string
+				time      time.Time
+				toRemind  string
+				recurring bool
 			)
 
-			if err := rows.Scan(&id, &who, &time, &toRemind); err != nil {
+			if err := rows.Scan(&id, &who, &time, &toRemind, &recurring); err != nil {
 				log.Println("Error scanning the row:", err)
 			}
 
 			if currentTime.UTC().After(time) {
 				_, err = botSession.ChannelMessageSend(remindersChannelId, fmt.Sprintf("<@%s>, reminding you %s.", who, toRemind))
-				rowsToDelete = append(rowsToDelete, id)
 				if err != nil {
 					fmt.Println(err)
 				}
+
+				if recurring {
+					newTime := time.AddDate(0, 0, 1)
+					rowsToUpdate = append(rowsToUpdate, rowToUpdate{id: id, newTime: newTime, who: who})
+				} else {
+					rowsToDelete = append(rowsToDelete, id)
+				}
+
 			}
 		}
 		rows.Close()
@@ -479,6 +575,18 @@ func handleReminders(botSession *discordgo.Session, ticker *time.Ticker) {
 		if err != nil {
 			log.Println("Error deleting the rows:", err)
 		}
+
+		for _, rowToUpdate := range rowsToUpdate {
+			_, err := dbHandle.Exec(`
+			UPDATE Reminders
+			SET time=?
+			WHERE id=?
+			`, rowToUpdate.newTime, rowToUpdate.id)
+			if err != nil {
+				log.Println("Error updating the row:", err)
+				botSession.ChannelMessageSend(remindersChannelId, fmt.Sprintf("<@%s>, couldn't update the recurring reminder. You might need to set it again.", rowToUpdate.who))
+			}
+		}
 	}
 }
 
@@ -488,25 +596,76 @@ func bootstrapDb() (*sql.DB, error) {
 		return db, err
 	}
 
-	_, err = db.Exec(`
+	row := db.QueryRow("PRAGMA user_version;")
+	if row == nil {
+		return db, errors.New("PRAGMA user_version not found")
+	}
+	var userVersion int
+	if err = row.Scan(&userVersion); err != nil {
+		return db, err
+	}
+
+	switch userVersion {
+	// Base schema.
+	case 0:
+		tx, err := db.Begin()
+		if err != nil {
+			return db, err
+		}
+		defer tx.Rollback()
+
+		_, err = tx.Exec(`
 		CREATE TABLE IF NOT EXISTS Reminders (
 			id INTEGER NOT NULL PRIMARY KEY,
 			who TEXT NOT NULL,
 			time DATETIME NOT NULL,
 			toRemind TEXT NOT NULL
 		);`)
-	if err != nil {
-		return db, err
-	}
+		if err != nil {
+			return db, err
+		}
 
-	_, err = db.Exec(`
+		_, err = db.Exec(`
 		CREATE TABLE IF NOT EXISTS TimezonePreferences (
 			id INTEGER NOT NULL PRIMARY KEY,
 			who TEXT NOT NULL,
 			timezonePreference TEXT NOT NULL
 		);`)
-	if err != nil {
-		return db, err
+		if err != nil {
+			return db, err
+		}
+
+		_, err = tx.Exec("PRAGMA user_version = 1;")
+		if err != nil {
+			return db, err
+		}
+
+		if err = tx.Commit(); err != nil {
+			return db, err
+		}
+
+		fallthrough
+	// Support recurring reminders.
+	case 1:
+		tx, err := db.Begin()
+		if err != nil {
+			return db, err
+		}
+		defer tx.Rollback()
+
+		_, err = tx.Exec("ALTER TABLE Reminders ADD recurring INTEGER NOT NULL DEFAULT 0")
+		if err != nil {
+			return db, err
+		}
+
+		_, err = tx.Exec("PRAGMA user_version = 2;")
+		if err != nil {
+			return db, err
+		}
+
+		if err = tx.Commit(); err != nil {
+			return db, err
+		}
 	}
 
 	return db, nil
@@ -526,6 +685,7 @@ func init() {
 	var err error
 	dbHandle, err = bootstrapDb()
 	if err != nil {
+		dbHandle.Close()
 		log.Fatalln("Error bootstrapping the database:", err)
 	}
 }
