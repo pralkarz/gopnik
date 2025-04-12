@@ -77,7 +77,9 @@ func messageCreate(session *discordgo.Session, message *discordgo.MessageCreate)
 		return
 	}
 
-	r, err := regexp.Compile(`^!remindme "in (\d{1,2}) (minutes?|hours?|days?|weeks?|months?)" "(.+)"`)
+	const remindmeRegex = `^!remindme in (\d{1,2}) (minutes?|hours?|days?|weeks?|months?) (.+)`
+
+	r, err := regexp.Compile(remindmeRegex)
 	if err != nil {
 		log.Println("Error compiling the regular expression:", err)
 	}
@@ -88,8 +90,8 @@ func messageCreate(session *discordgo.Session, message *discordgo.MessageCreate)
 		session.ChannelMessageSendReply(
 			message.ChannelID,
 			"Invalid !remindme syntax. Has to match the regex "+
-				"`^!remindme \"in (\\d{1,2}) (minutes?|hours?|days?|weeks?|months?)\" \"(.+)\"`, e.g. "+
-				"`!remindme \"in 2 days\" \"to buy a gift for Chris\"`.",
+				remindmeRegex+
+				"e.g. `!remindme \"in 2 days\" \"to buy a gift for Chris\"`.",
 			message.Reference(),
 		)
 
