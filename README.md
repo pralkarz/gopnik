@@ -2,7 +2,7 @@
 
 `gopnik` (funny word + the app is written in Go) is a tiny Discord bot that reminds users about various things they ask it to.
 
-![example usage](https://github.com/user-attachments/assets/aaba9865-e91e-4460-be74-6f66356d8c9f)
+![example usage](https://github.com/user-attachments/assets/640c7115-ff48-47b0-a634-162532de0621)
 
 # usage
 ![how to use](https://github.com/user-attachments/assets/d23f19fd-1bac-480d-8ad6-f2460060613d)
