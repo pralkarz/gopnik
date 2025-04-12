@@ -23,6 +23,15 @@ var (
 	dbHandle           *sql.DB
 )
 
+type eventState struct {
+	session *discordgo.Session
+	message *discordgo.MessageCreate
+}
+
+func (es *eventState) reply(msg string) {
+	es.session.ChannelMessageSendReply(es.message.ChannelID, msg, es.message.Reference())
+}
+
 func isLeapYear(year int) bool {
 	if year%400 == 0 {
 		return true
@@ -31,16 +40,11 @@ func isLeapYear(year int) bool {
 	return year%4 == 0 && year%100 != 0
 }
 
-func handlePendingReminders(session *discordgo.Session, message *discordgo.MessageCreate) {
-	rows, err := dbHandle.Query("SELECT * FROM reminders WHERE who=?", message.Author.ID)
+func handlePendingReminders(es *eventState) {
+	rows, err := dbHandle.Query("SELECT * FROM reminders WHERE who=?", es.message.Author.ID)
 	if err != nil {
 		log.Println("Error querying the pending reminders:", err)
-		session.ChannelMessageSendReply(
-			message.ChannelID,
-			"Something went wrong while querying the pending reminders. Check the stderr output.",
-			message.Reference(),
-		)
-
+		es.reply("Something went wrong while querying the pending reminders. Check the stderr output.")
 		return
 	}
 	defer rows.Close()
@@ -62,22 +66,12 @@ func handlePendingReminders(session *discordgo.Session, message *discordgo.Messa
 	}
 	if err = rows.Err(); err != nil {
 		log.Println("Error when iterating over the pending reminders:", err)
-		session.ChannelMessageSendReply(
-			message.ChannelID,
-			"Something went wrong while iterating over the pending reminders. Check the stderr output.",
-			message.Reference(),
-		)
-
+		es.reply("Something went wrong while iterating over the pending reminders. Check the stderr output.")
 		return
 	}
 
 	if len(reminders) == 0 {
-		session.ChannelMessageSendReply(
-			message.ChannelID,
-			"You have no pending reminders.",
-			message.Reference(),
-		)
-
+		es.reply("You have no pending reminders.")
 		return
 	}
 
@@ -87,11 +81,7 @@ func handlePendingReminders(session *discordgo.Session, message *discordgo.Messa
 		pendingReminders.WriteString(fmt.Sprintf("%d. Reminder %s.\n", idx+1, reminder))
 	}
 
-	session.ChannelMessageSendReply(
-		message.ChannelID,
-		pendingReminders.String(),
-		message.Reference(),
-	)
+	es.reply(pendingReminders.String())
 }
 
 func isAbsoluteInputValid(day int, month int, year int, hour int, minute int, currentYear int) (string, bool) {
@@ -135,7 +125,7 @@ func isAbsoluteInputValid(day int, month int, year int, hour int, minute int, cu
 	return "", true
 }
 
-func handleAbsoluteRegexMatch(session *discordgo.Session, message *discordgo.MessageCreate, matches []string) {
+func handleAbsoluteRegexMatch(es *eventState, matches []string) {
 	// Default to Europe/Warsaw as that's the author's timezone. :D
 	location, err := time.LoadLocation("Europe/Warsaw")
 	if err != nil {
@@ -146,12 +136,7 @@ func handleAbsoluteRegexMatch(session *discordgo.Session, message *discordgo.Mes
 		location, err = time.LoadLocation(matches[7])
 		if err != nil {
 			log.Println("Error loading the location:", err)
-			session.ChannelMessageSendReply(
-				message.ChannelID,
-				"Something went wrong while loading the location. Make sure it's correct or check the stderr output.",
-				message.Reference(),
-			)
-
+			es.reply("Something went wrong while loading the location. Make sure it's correct or check the stderr output.")
 			return
 		}
 	}
@@ -179,7 +164,7 @@ func handleAbsoluteRegexMatch(session *discordgo.Session, message *discordgo.Mes
 	}
 
 	if errMsg, ok := isAbsoluteInputValid(day, month, year, hour, minute, currentYear); !ok {
-		session.ChannelMessageSendReply(message.ChannelID, errMsg, message.Reference())
+		es.reply(errMsg)
 		return
 	}
 
@@ -201,47 +186,26 @@ func handleAbsoluteRegexMatch(session *discordgo.Session, message *discordgo.Mes
 	)
 	if err != nil {
 		log.Println("Error parsing the time:", err)
-		session.ChannelMessageSendReply(
-			message.ChannelID,
-			"Something went wrong while parsing the time. Check the stderr output.",
-			message.Reference(),
-		)
-
+		es.reply("Something went wrong while parsing the time. Check the stderr output.")
 		return
 	}
 
 	targetTime = targetTime.UTC()
 	if targetTime.Before(currentTime.UTC()) {
-		session.ChannelMessageSendReply(
-			message.ChannelID,
-			"The date cannot be in the past, who would've guessed?",
-			message.Reference(),
-		)
-
+		es.reply("The date cannot be in the past, who would've guessed?")
 		return
 	}
 
-	_, err = dbHandle.Exec("INSERT INTO reminders VALUES(NULL,?,?,?)", message.Author.ID, targetTime, strings.Replace(toRemind, " my ", " your ", -1))
+	_, err = dbHandle.Exec("INSERT INTO reminders VALUES(NULL,?,?,?)", es.message.Author.ID, targetTime, strings.Replace(toRemind, " my ", " your ", -1))
 	if err != nil {
 		log.Println("Error inserting into the database:", err)
-		session.ChannelMessageSendReply(
-			message.ChannelID,
-			"Something went wrong while inserting to the DB. Check the stderr output.",
-			message.Reference(),
-		)
-
+		es.reply("Something went wrong while inserting to the DB. Check the stderr output.")
 		return
 	}
 
-	session.ChannelMessageSendReply(
-		message.ChannelID,
-		strings.Replace(
-			fmt.Sprintf("Successfully added to the database. I'll remind you %s on %02d.%02d.%d at %02d:%02d %s in the %s timezone.",
-				toRemind, day, month, year, hour, minute, period, location.String()),
-			" my ", " your ", -1,
-		),
-		message.Reference(),
-	)
+	reply := fmt.Sprintf("Successfully added to the database. I'll remind you %s on %02d.%02d.%d at %02d:%02d %s in the %s timezone.",
+		toRemind, day, month, year, hour, minute, period, location.String())
+	es.reply(strings.Replace(reply, " my ", " your ", -1))
 }
 
 func parseRelativeRemindme(matches []string) (int, string, string, time.Time) {
@@ -267,35 +231,21 @@ func parseRelativeRemindme(matches []string) (int, string, string, time.Time) {
 	return n, units, toRemind, targetTime
 }
 
-func handleRelativeRegexMatch(session *discordgo.Session, message *discordgo.MessageCreate, matches []string) {
+func handleRelativeRegexMatch(es *eventState, matches []string) {
 	n, units, toRemind, targetTime := parseRelativeRemindme(matches)
 	if n == 0 {
-		session.ChannelMessageSendReply(
-			message.ChannelID,
-			strings.Replace(fmt.Sprintf("Immediately reminding you %s, you silly goose.", toRemind), " my ", " your ", -1),
-			message.Reference(),
-		)
-
+		es.reply(strings.Replace(fmt.Sprintf("Immediately reminding you %s, you silly goose.", toRemind), " my ", " your ", -1))
 		return
 	}
 
-	_, err := dbHandle.Exec("INSERT INTO reminders VALUES(NULL,?,?,?)", message.Author.ID, targetTime, strings.Replace(toRemind, " my ", " your ", -1))
+	_, err := dbHandle.Exec("INSERT INTO reminders VALUES(NULL,?,?,?)", es.message.Author.ID, targetTime, strings.Replace(toRemind, " my ", " your ", -1))
 	if err != nil {
 		log.Println("Error inserting into the database:", err)
-		session.ChannelMessageSendReply(
-			message.ChannelID,
-			"Something went wrong while inserting to the DB. Check the stderr output.",
-			message.Reference(),
-		)
-
+		es.reply("Something went wrong while inserting to the DB. Check the stderr output.")
 		return
 	}
 
-	session.ChannelMessageSendReply(
-		message.ChannelID,
-		fmt.Sprintf("Successfully added to the database. I'll remind you in %d %s.", n, units),
-		message.Reference(),
-	)
+	es.reply(fmt.Sprintf("Successfully added to the database. I'll remind you in %d %s.", n, units))
 }
 
 func messageCreate(session *discordgo.Session, message *discordgo.MessageCreate) {
@@ -309,8 +259,10 @@ func messageCreate(session *discordgo.Session, message *discordgo.MessageCreate)
 		return
 	}
 
+	eventState := eventState{session, message}
+
 	if message.Content == "!reminders" {
-		handlePendingReminders(session, message)
+		handlePendingReminders(&eventState)
 		return
 	}
 
@@ -324,20 +276,17 @@ func messageCreate(session *discordgo.Session, message *discordgo.MessageCreate)
 	doesRelativeRegexMatch := relativeRemindmeRegexCompiled.MatchString(message.Content)
 
 	if strings.HasPrefix(message.Content, "!remindme") && !doesAbsoluteRegexMatch && !doesRelativeRegexMatch {
-		session.ChannelMessageSendReply(
-			message.ChannelID,
-			"Invalid `!remindme` syntax. Has to match either of these regexes:\n"+
-				fmt.Sprintf("`%s`\n", absoluteRemindmeRegex)+
-				fmt.Sprintf("`%s`\n\n", relativeRemindmeRegex)+
-				"For example:\n"+
-				"`!remindme on 23.12 at 12 PM America/New_York that Christmas is tomorrow`\n"+
-				"`!remindme in 2 days to buy a gift for Aurora`\n\n"+
-				"The tz identifier (e.g. `America/New_York`), when specified, needs to match one of the identifiers from "+
-				"[IANA Time Zone Database](https://en.wikipedia.org/wiki/List_of_tz_database_time_zones).\n"+
+		eventState.reply(
+			"Invalid `!remindme` syntax. Has to match either of these regexes:\n" +
+				fmt.Sprintf("`%s`\n", absoluteRemindmeRegex) +
+				fmt.Sprintf("`%s`\n\n", relativeRemindmeRegex) +
+				"For example:\n" +
+				"`!remindme on 23.12 at 12 PM America/New_York that Christmas is tomorrow`\n" +
+				"`!remindme in 2 days to buy a gift for Aurora`\n\n" +
+				"The tz identifier (e.g. `America/New_York`), when specified, needs to match one of the identifiers from " +
+				"[IANA Time Zone Database](https://en.wikipedia.org/wiki/List_of_tz_database_time_zones).\n" +
 				"When not specified, it defaults to `Europe/Warsaw`.",
-			message.Reference(),
 		)
-
 		return
 	}
 
@@ -346,11 +295,11 @@ func messageCreate(session *discordgo.Session, message *discordgo.MessageCreate)
 	}
 
 	if doesAbsoluteRegexMatch {
-		handleAbsoluteRegexMatch(session, message, absoluteRemindmeRegexCompiled.FindStringSubmatch(message.Content))
+		handleAbsoluteRegexMatch(&eventState, absoluteRemindmeRegexCompiled.FindStringSubmatch(message.Content))
 		return
 	}
 
-	handleRelativeRegexMatch(session, message, relativeRemindmeRegexCompiled.FindStringSubmatch(message.Content))
+	handleRelativeRegexMatch(&eventState, relativeRemindmeRegexCompiled.FindStringSubmatch(message.Content))
 }
 
 func handleReminders(botSession *discordgo.Session, ticker *time.Ticker) {
