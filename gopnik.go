@@ -41,7 +41,7 @@ func isLeapYear(year int) bool {
 }
 
 func handlePendingReminders(es *eventState) {
-	rows, err := dbHandle.Query("SELECT * FROM reminders WHERE who=? ORDER BY time", es.message.Author.ID)
+	rows, err := dbHandle.Query("SELECT * FROM Reminders WHERE who=? ORDER BY time", es.message.Author.ID)
 	if err != nil {
 		log.Println("Error querying the pending reminders:", err)
 		es.reply("Something went wrong while querying the pending reminders. Check the stderr output.")
@@ -320,7 +320,7 @@ func handleReminders(botSession *discordgo.Session, ticker *time.Ticker) {
 			continue
 		}
 
-		rows, err := dbHandle.Query("SELECT * FROM reminders")
+		rows, err := dbHandle.Query("SELECT * FROM Reminders")
 		if err != nil {
 			log.Println("Error querying the rows when handling the reminders:", err)
 		}
@@ -354,7 +354,7 @@ func handleReminders(botSession *discordgo.Session, ticker *time.Ticker) {
 		}
 
 		_, err = dbHandle.Exec(
-			fmt.Sprintf("DELETE FROM reminders WHERE id IN (%s)", strings.Join(rowsToDelete, ",")),
+			fmt.Sprintf("DELETE FROM Reminders WHERE id IN (%s)", strings.Join(rowsToDelete, ",")),
 		)
 		if err != nil {
 			log.Println("Error deleting the rows:", err)
