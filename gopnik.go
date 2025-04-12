@@ -41,7 +41,7 @@ func isLeapYear(year int) bool {
 }
 
 func handlePendingReminders(es *eventState) {
-	rows, err := dbHandle.Query("SELECT * FROM reminders WHERE who=?", es.message.Author.ID)
+	rows, err := dbHandle.Query("SELECT * FROM reminders WHERE who=? ORDER BY time", es.message.Author.ID)
 	if err != nil {
 		log.Println("Error querying the pending reminders:", err)
 		es.reply("Something went wrong while querying the pending reminders. Check the stderr output.")
