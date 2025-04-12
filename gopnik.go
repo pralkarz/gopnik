@@ -73,7 +73,27 @@ func isAbsoluteInputValid(day int, month int, year int, hour int, minute int, cu
 }
 
 func handleAbsoluteRegexMatch(session *discordgo.Session, message *discordgo.MessageCreate, matches []string) {
-	currentTime := time.Now()
+	// Default to Europe/Warsaw as that's the author's timezone. :D
+	location, err := time.LoadLocation("Europe/Warsaw")
+	if err != nil {
+		log.Fatalln("Couldn't load the default location, something went very wrong:", err)
+	}
+
+	if len(matches[7]) > 0 {
+		location, err = time.LoadLocation(matches[7])
+		if err != nil {
+			log.Println("Error loading the location:", err)
+			session.ChannelMessageSendReply(
+				message.ChannelID,
+				"Something went wrong while loading the location. Make sure it's correct or check the stderr output.",
+				message.Reference(),
+			)
+
+			return
+		}
+	}
+
+	currentTime := time.Now().In(location)
 	currentYear := currentTime.Year()
 
 	day, _ := strconv.Atoi(matches[1])
@@ -101,7 +121,7 @@ func handleAbsoluteRegexMatch(session *discordgo.Session, message *discordgo.Mes
 		return
 	}
 
-	period, toRemind := matches[6], matches[7]
+	period, toRemind := matches[6], matches[8]
 
 	// Hour in the 12-hour format is needed later for the information for the user,
 	// but the database expects the 24-hour format.
@@ -115,7 +135,7 @@ func handleAbsoluteRegexMatch(session *discordgo.Session, message *discordgo.Mes
 	targetTime, err := time.ParseInLocation(
 		time.DateTime,
 		fmt.Sprintf("%d-%02d-%02d %02d:%02d:%02d", year, month, day, dbHour, minute, 0),
-		currentTime.Location(),
+		location,
 	)
 	if err != nil {
 		log.Println("Error parsing the time:", err)
@@ -129,7 +149,7 @@ func handleAbsoluteRegexMatch(session *discordgo.Session, message *discordgo.Mes
 	}
 
 	targetTime = targetTime.UTC()
-	if targetTime.Before(currentTime) {
+	if targetTime.Before(currentTime.UTC()) {
 		session.ChannelMessageSendReply(
 			message.ChannelID,
 			"The date cannot be in the past, who would've guessed?",
@@ -153,7 +173,11 @@ func handleAbsoluteRegexMatch(session *discordgo.Session, message *discordgo.Mes
 
 	session.ChannelMessageSendReply(
 		message.ChannelID,
-		fmt.Sprintf("Successfully added to the database. I'll remind you on %02d.%02d.%d at %02d:%02d %s.", day, month, year, hour, minute, period),
+		strings.Replace(
+			fmt.Sprintf("Successfully added to the database. I'll remind %s you on %02d.%02d.%d at %02d:%02d %s in the %s timezone.",
+				toRemind, day, month, year, hour, minute, period, location.String()),
+			" my ", " your ", -1,
+		),
 		message.Reference(),
 	)
 }
@@ -223,7 +247,7 @@ func messageCreate(session *discordgo.Session, message *discordgo.MessageCreate)
 		return
 	}
 
-	const absoluteRemindmeRegex = `^!remindme on (\d{1,2})\.(\d{1,2})(?:\.(\d{4}))? at (\d{1,2})(?::(\d{1,2}))? (AM|PM) (.+)`
+	const absoluteRemindmeRegex = `^!remindme on (\d{1,2})\.(\d{1,2})(?:\.(\d{4}))? at (\d{1,2})(?::(\d{1,2}))? (AM|PM) ?([a-zA-Z]+\/[a-zA-Z_]+)? (.+)`
 	const relativeRemindmeRegex = `^!remindme in (\d{1,2}) (minutes?|hours?|days?|weeks?|months?) (.+)`
 
 	absoluteRemindmeRegexCompiled := regexp.MustCompile(absoluteRemindmeRegex)
@@ -239,8 +263,11 @@ func messageCreate(session *discordgo.Session, message *discordgo.MessageCreate)
 				fmt.Sprintf("`%s`\n", absoluteRemindmeRegex)+
 				fmt.Sprintf("`%s`\n\n", relativeRemindmeRegex)+
 				"For example:\n"+
-				"`!remindme on 23.12 at 12 PM that Christmas is tomorrow`\n"+
-				"`!remindme in 2 days to buy a gift for Aurora`",
+				"`!remindme on 23.12 at 12 PM America/New_York that Christmas is tomorrow`\n"+
+				"`!remindme in 2 days to buy a gift for Aurora`\n\n"+
+				"The tz identifier (e.g. `America/New_York`), when specified, needs to match one of the identifiers from "+
+				"[IANA Time Zone Database](https://en.wikipedia.org/wiki/List_of_tz_database_time_zones).\n"+
+				"When not specified, it defaults to `Europe/Warsaw`.",
 			message.Reference(),
 		)
 
