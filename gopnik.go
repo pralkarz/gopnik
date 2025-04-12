@@ -89,9 +89,9 @@ func messageCreate(session *discordgo.Session, message *discordgo.MessageCreate)
 	if strings.HasPrefix(message.Content, "!remindme") && !messageMatches {
 		session.ChannelMessageSendReply(
 			message.ChannelID,
-			"Invalid !remindme syntax. Has to match the regex "+
+			"Invalid !remindme syntax. Has to match the regex `"+
 				remindmeRegex+
-				"e.g. `!remindme \"in 2 days\" \"to buy a gift for Chris\"`.",
+				"`, e.g. `!remindme in 2 days to buy a gift for Chris`.",
 			message.Reference(),
 		)
 
@@ -106,7 +106,7 @@ func messageCreate(session *discordgo.Session, message *discordgo.MessageCreate)
 	if n == 0 {
 		session.ChannelMessageSendReply(
 			message.ChannelID,
-			strings.Replace(fmt.Sprintf("Immediately reminding you to %s, you silly goose.", toRemind), " my ", " your ", -1),
+			strings.Replace(fmt.Sprintf("Immediately reminding you %s, you silly goose.", toRemind), " my ", " your ", -1),
 			message.Reference(),
 		)
 
@@ -158,7 +158,7 @@ func handleReminders(botSession *discordgo.Session, ticker *time.Ticker) {
 			}
 
 			if currentTime.UTC().After(time) {
-				botSession.ChannelMessageSend(remindersChannelId, fmt.Sprintf("<@%s>, reminding you to %s.", who, toRemind))
+				botSession.ChannelMessageSend(remindersChannelId, fmt.Sprintf("<@%s>, reminding you %s.", who, toRemind))
 				rowsToDelete = append(rowsToDelete, id)
 			}
 		}
