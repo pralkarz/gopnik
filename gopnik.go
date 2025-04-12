@@ -1,7 +1,10 @@
+// TODO: Switch to `log` logging.
+
 package main
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"os/signal"
@@ -15,6 +18,12 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 )
 
+var (
+	token              = ""
+	remindersChannelId = ""
+	dbHandle           *sql.DB
+)
+
 func bootstrapDb() (*sql.DB, error) {
 	db, err := sql.Open("sqlite3", "reminders.db")
 	if err != nil {
@@ -24,6 +33,7 @@ func bootstrapDb() (*sql.DB, error) {
 	_, err = db.Exec(`
 		CREATE TABLE IF NOT EXISTS reminders (
 			id INTEGER NOT NULL PRIMARY KEY,
+			who TEXT NOT NULL,
 			time DATETIME NOT NULL,
 			toRemind TEXT NOT NULL
 		);`)
@@ -40,21 +50,16 @@ func parseRemindme(matches []string) (int, string, string, time.Time) {
 
 	targetTime := time.Now().UTC()
 	switch units {
-	case "minute":
-	case "minutes":
+	case "minute", "minutes":
 		targetTime = targetTime.Add(time.Minute * time.Duration(n))
-	case "hour":
-	case "hours":
+	case "hour", "hours":
 		targetTime = targetTime.Add(time.Hour * time.Duration(n))
-	case "day":
-	case "days":
-		targetTime = targetTime.Add(time.Hour * 24 * time.Duration(n))
-	case "week":
-	case "weeks":
-		targetTime = targetTime.Add(time.Hour * 24 * 7 * time.Duration(n))
-	case "month":
-	case "months":
-		targetTime = targetTime.Add(time.Hour * 24 * 30 * time.Duration(n))
+	case "day", "days":
+		targetTime = targetTime.AddDate(0, 0, n)
+	case "week", "weeks":
+		targetTime = targetTime.AddDate(0, 0, 7*n)
+	case "month", "months":
+		targetTime = targetTime.AddDate(0, n, 0)
 	default:
 		fmt.Fprintln(os.Stderr, "Something went really wrong, we shouldn't be here.")
 	}
@@ -63,14 +68,19 @@ func parseRemindme(matches []string) (int, string, string, time.Time) {
 }
 
 func messageCreate(session *discordgo.Session, message *discordgo.MessageCreate) {
-	// Ignore bot's own messages.
+	// Ignore the bot's own messages.
 	if message.Author.ID == session.State.User.ID {
 		return
 	}
 
-	r, err := regexp.Compile(`^!remindme "in (\d+) (minutes?|hours?|days?|weeks?|months?)" "(.+)"`)
+	// Ignore other bots' shenanigans.
+	if message.Author.Bot {
+		return
+	}
+
+	r, err := regexp.Compile(`^!remindme "in (\d{1,2}) (minutes?|hours?|days?|weeks?|months?)" "(.+)"`)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "Error compiling the regular expression: ", err)
+		fmt.Fprintln(os.Stderr, "Error compiling the regular expression:", err)
 	}
 
 	messageMatches := r.MatchString(message.Content)
@@ -79,7 +89,7 @@ func messageCreate(session *discordgo.Session, message *discordgo.MessageCreate)
 		session.ChannelMessageSendReply(
 			message.ChannelID,
 			"Invalid !remindme syntax. Has to match the regex "+
-				"`^!remindme \"in (\\d+) (minutes?|hours?|days?|weeks?|months?)\" \"(.+)\"`, e.g. "+
+				"`^!remindme \"in (\\d{1,2}) (minutes?|hours?|days?|weeks?|months?)\" \"(.+)\"`, e.g. "+
 				"`!remindme \"in 2 days\" \"to buy a gift for Chris\"`.",
 			message.Reference(),
 		)
@@ -92,28 +102,22 @@ func messageCreate(session *discordgo.Session, message *discordgo.MessageCreate)
 	}
 
 	n, units, toRemind, targetTime := parseRemindme(r.FindStringSubmatch(message.Content))
-
-	db, err := bootstrapDb()
-	if err != nil {
-		db.Close()
-
-		fmt.Fprintln(os.Stderr, "Error bootstrapping the database: ", err)
+	if n == 0 {
 		session.ChannelMessageSendReply(
 			message.ChannelID,
-			"Something went wrong with bootstrapping the DB. Check the stderr output.",
+			strings.Replace(fmt.Sprintf("Immediately reminding you to %s, you silly goose.", toRemind), " my ", " your ", -1),
 			message.Reference(),
 		)
 
 		return
 	}
-	defer db.Close()
 
-	_, err = db.Exec("INSERT INTO reminders VALUES(NULL,?,?)", targetTime, toRemind)
+	_, err = dbHandle.Exec("INSERT INTO reminders VALUES(NULL,?,?,?)", message.Author.ID, targetTime, strings.Replace(toRemind, " my ", " your ", -1))
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "Error inserting into the database: ", err)
+		fmt.Fprintln(os.Stderr, "Error inserting into the database:", err)
 		session.ChannelMessageSendReply(
 			message.ChannelID,
-			"Something went wrong with inserting to the DB. Check the stderr output.",
+			"Something went wrong while inserting to the DB. Check the stderr output.",
 			message.Reference(),
 		)
 
@@ -122,21 +126,84 @@ func messageCreate(session *discordgo.Session, message *discordgo.MessageCreate)
 
 	session.ChannelMessageSendReply(
 		message.ChannelID,
-		fmt.Sprintf("Successfully added to the database. I'll remind you in %d %s %s.", n, units, toRemind),
+		fmt.Sprintf("Successfully added to the database. I'll remind you in %d %s.", n, units),
 		message.Reference(),
 	)
 }
 
-func main() {
-	token := os.Getenv("GOPNIK_TOKEN")
+func handleReminders(botSession *discordgo.Session, ticker *time.Ticker) {
+	for currentTime := range ticker.C {
+		if _, err := os.Stat("./reminders.db"); errors.Is(err, os.ErrNotExist) {
+			fmt.Fprintln(os.Stderr, "Database not bootstrapped yet, nothing to check.")
+			continue
+		}
+
+		rows, err := dbHandle.Query("SELECT * FROM reminders")
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "Error querying the rows when handling the reminders:", err)
+		}
+
+		rowsToDelete := []string{}
+		for rows.Next() {
+			var (
+				id       string
+				who      string
+				time     time.Time
+				toRemind string
+			)
+
+			if err := rows.Scan(&id, &who, &time, &toRemind); err != nil {
+				fmt.Fprintln(os.Stderr, "Error scanning the row:", err)
+			}
+
+			if currentTime.UTC().After(time) {
+				botSession.ChannelMessageSend(remindersChannelId, fmt.Sprintf("<@%s>, reminding you to %s.", who, toRemind))
+				rowsToDelete = append(rowsToDelete, id)
+			}
+		}
+		rows.Close()
+
+		placeholders := make([]string, len(rowsToDelete))
+		for i := range placeholders {
+			placeholders[i] = "?"
+		}
+
+		_, err = dbHandle.Exec(
+			fmt.Sprintf("DELETE FROM reminders WHERE id IN (%s)", strings.Join(rowsToDelete, ",")),
+		)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "Error deleting the rows:", err)
+		}
+	}
+}
+
+func init() {
+	token = os.Getenv("GOPNIK_TOKEN")
 	if len(token) == 0 {
 		fmt.Fprintln(os.Stderr, "Bot token not found. Make sure to set the GOPNIK_TOKEN environment variable.")
 		os.Exit(42)
 	}
 
+	remindersChannelId = os.Getenv("REMINDERS_CHANNEL")
+	if len(remindersChannelId) == 0 {
+		fmt.Fprintln(os.Stderr, "Reminders channel ID not found. Make sure to set the REMINDERS_CHANNEL environment variable.")
+		os.Exit(42)
+	}
+
+	var err error
+	dbHandle, err = bootstrapDb()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "Error bootstrapping the database:", err)
+		os.Exit(42)
+	}
+}
+
+func main() {
+	defer dbHandle.Close()
+
 	botSession, err := discordgo.New("Bot " + token)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "Error creating the bot session: ", err)
+		fmt.Fprintln(os.Stderr, "Error creating the bot session:", err)
 		os.Exit(42)
 	}
 
@@ -146,10 +213,13 @@ func main() {
 
 	err = botSession.Open()
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "Error opening the WebSocket connection: ", err)
+		fmt.Fprintln(os.Stderr, "Error opening the WebSocket connection:", err)
 		os.Exit(42)
 	}
 	defer botSession.Close()
+
+	ticker := time.NewTicker(time.Minute)
+	go handleReminders(botSession, ticker)
 
 	fmt.Println("Bot is now running. Press CTRL-C to exit.")
 	sc := make(chan os.Signal, 1)
@@ -157,4 +227,5 @@ func main() {
 	<-sc
 
 	fmt.Println("Shutting down...")
+	ticker.Stop()
 }
