@@ -84,6 +84,46 @@ func handlePendingReminders(es *eventState) {
 	es.reply(pendingReminders.String())
 }
 
+func handleTzpreferenceRegexMatch(es *eventState, matches []string) {
+	newTzPreference, err := time.LoadLocation(matches[1])
+	if err != nil {
+		log.Println("Error loading the location:", err)
+		es.reply("Something went wrong while loading the location. Make sure it's correct or check the stderr output.")
+		return
+	}
+
+	var (
+		id                   string
+		who                  string
+		existingTzPreference string
+	)
+
+	err = dbHandle.QueryRow("SELECT * FROM TimezonePreferences WHERE who=?", es.message.Author.ID).Scan(&id, &who, &existingTzPreference)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			_, err = dbHandle.Exec("INSERT INTO TimezonePreferences VALUES(NULL,?,?)", es.message.Author.ID, newTzPreference.String())
+			if err != nil {
+				log.Println("Error inserting into the database:", err)
+				es.reply("Something went wrong while inserting to the DB. Check the stderr output.")
+				return
+			}
+		} else {
+			log.Println("Error querying for a previously saved preference:", err)
+			es.reply("Something went wrong while querying for a previously saved preference. Check the stderr output.")
+			return
+		}
+	}
+
+	_, err = dbHandle.Exec("UPDATE TimezonePreferences SET timezonePreference=? WHERE id=?", newTzPreference.String(), id)
+	if err != nil {
+		log.Println("Error updating the database:", err)
+		es.reply("Something went wrong while updating the DB. Check the stderr output.")
+		return
+	}
+
+	es.reply("Successfully set the preference.")
+}
+
 func isAbsoluteInputValid(day int, month int, year int, hour int, minute int, currentYear int) (string, bool) {
 	// Validate day and month.
 	if day == 0 || day > 31 {
@@ -125,6 +165,29 @@ func isAbsoluteInputValid(day int, month int, year int, hour int, minute int, cu
 	return "", true
 }
 
+// Resolves the location with the following precedence:
+// 1. Explicitly specified in the command.
+// 2. Read from the TimezonePreferences table.
+// 3. Default (Europe/Warsaw).
+func resolveLocation(es *eventState, locationMatch string) (*time.Location, error) {
+	if len(locationMatch) > 0 {
+		return time.LoadLocation(locationMatch)
+	} else {
+		var (
+			id                   string
+			who                  string
+			existingTzPreference string
+		)
+
+		err := dbHandle.QueryRow("SELECT * FROM TimezonePreferences WHERE who=?", es.message.Author.ID).Scan(&id, &who, &existingTzPreference)
+		if errors.Is(err, sql.ErrNoRows) {
+			return time.LoadLocation("Europe/Warsaw")
+		} else {
+			return time.LoadLocation(existingTzPreference)
+		}
+	}
+}
+
 func handleAbsoluteRegexMatch(es *eventState, matches []string) {
 	toRemind := matches[8]
 	if len(toRemind) > 1500 {
@@ -132,19 +195,11 @@ func handleAbsoluteRegexMatch(es *eventState, matches []string) {
 		return
 	}
 
-	// Default to Europe/Warsaw as that's the author's timezone. :D
-	location, err := time.LoadLocation("Europe/Warsaw")
+	location, err := resolveLocation(es, matches[7])
 	if err != nil {
-		log.Fatalln("Couldn't load the default location, something went very wrong:", err)
-	}
-
-	if len(matches[7]) > 0 {
-		location, err = time.LoadLocation(matches[7])
-		if err != nil {
-			log.Println("Error loading the location:", err)
-			es.reply("Something went wrong while loading the location. Make sure it's correct or check the stderr output.")
-			return
-		}
+		log.Println("Error resolving the location:", err)
+		es.reply("Couldn't resolve your location. Make sure you spelled it correctly or check the stderr output.")
+		return
 	}
 
 	currentTime := time.Now().In(location)
@@ -284,6 +339,16 @@ func messageCreate(session *discordgo.Session, message *discordgo.MessageCreate)
 		return
 	}
 
+	const tzpreferenceRegex = `^!tzpreference ([a-zA-Z]+\/[a-zA-Z_]+)$`
+	tzpreferenceRegexCompiled := regexp.MustCompile(tzpreferenceRegex)
+
+	doesTzpreferenceRegexMatch := tzpreferenceRegexCompiled.MatchString(message.Content)
+
+	if doesTzpreferenceRegexMatch {
+		handleTzpreferenceRegexMatch(&eventState, tzpreferenceRegexCompiled.FindStringSubmatch(message.Content))
+		return
+	}
+
 	const absoluteRemindmeRegex = `^!remindme on (\d{1,2})\.(\d{1,2})(?:\.(\d{4}))? at (\d{1,2})(?::(\d{1,2}))? (AM|PM) ?([a-zA-Z]+\/[a-zA-Z_]+)? (.+)`
 	const relativeRemindmeRegex = `^!remindme in (\d{1,2}|an?) (minutes?|hours?|days?|weeks?|months?) (.+)`
 
@@ -301,9 +366,15 @@ func messageCreate(session *discordgo.Session, message *discordgo.MessageCreate)
 				"For example:\n" +
 				"`!remindme on 23.12 at 12 PM America/New_York that Christmas is tomorrow`\n" +
 				"`!remindme in 2 days to buy a gift for Aurora`\n\n" +
-				"The tz identifier (e.g. `America/New_York`), when specified, needs to match one of the identifiers from " +
-				"[IANA Time Zone Database](https://en.wikipedia.org/wiki/List_of_tz_database_time_zones).\n" +
-				"When not specified, it defaults to `Europe/Warsaw`.",
+				"⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n\n" +
+				"The timezone identifier (e.g. `America/New_York`), when specified, needs to match one of the identifiers from " +
+				"the [IANA Time Zone Database](https://en.wikipedia.org/wiki/List_of_tz_database_time_zones). " +
+				"When not specified, first it checks whether you have a saved preference in the database, " +
+				"and if not, defaults to `Europe/Warsaw`.\n\n" +
+				"You can set your preference with:\n" +
+				fmt.Sprintf("`%s`\n\n", tzpreferenceRegex) +
+				"For example:\n" +
+				"`!tzpreference Antarctica/South_Pole`",
 		)
 		return
 	}
@@ -381,6 +452,16 @@ func bootstrapDb() (*sql.DB, error) {
 			who TEXT NOT NULL,
 			time DATETIME NOT NULL,
 			toRemind TEXT NOT NULL
+		);`)
+	if err != nil {
+		return db, err
+	}
+
+	_, err = db.Exec(`
+		CREATE TABLE IF NOT EXISTS TimezonePreferences (
+			id INTEGER NOT NULL PRIMARY KEY,
+			who TEXT NOT NULL,
+			timezonePreference TEXT NOT NULL
 		);`)
 	if err != nil {
 		return db, err
