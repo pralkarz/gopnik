@@ -126,6 +126,12 @@ func isAbsoluteInputValid(day int, month int, year int, hour int, minute int, cu
 }
 
 func handleAbsoluteRegexMatch(es *eventState, matches []string) {
+	toRemind := matches[8]
+	if len(toRemind) > 1500 {
+		es.reply("The maximum reminder length is 1500 characters, you naughty person.")
+		return
+	}
+
 	// Default to Europe/Warsaw as that's the author's timezone. :D
 	location, err := time.LoadLocation("Europe/Warsaw")
 	if err != nil {
@@ -168,7 +174,7 @@ func handleAbsoluteRegexMatch(es *eventState, matches []string) {
 		return
 	}
 
-	period, toRemind := matches[6], matches[8]
+	period := matches[6]
 
 	// Hour in the 12-hour format is needed later for the information for the user,
 	// but the database expects the 24-hour format.
@@ -233,6 +239,11 @@ func parseRelativeRemindme(matches []string) (int, string, string, time.Time) {
 
 func handleRelativeRegexMatch(es *eventState, matches []string) {
 	n, units, toRemind, targetTime := parseRelativeRemindme(matches)
+	if len(toRemind) > 1500 {
+		es.reply("The maximum reminder length is 1500 characters.")
+		return
+	}
+
 	if n == 0 {
 		es.reply(strings.Replace(fmt.Sprintf("Immediately reminding you %s, you silly goose.", toRemind), " my ", " your ", -1))
 		return
@@ -328,8 +339,11 @@ func handleReminders(botSession *discordgo.Session, ticker *time.Ticker) {
 			}
 
 			if currentTime.UTC().After(time) {
-				botSession.ChannelMessageSend(remindersChannelId, fmt.Sprintf("<@%s>, reminding you %s.", who, toRemind))
+				_, err = botSession.ChannelMessageSend(remindersChannelId, fmt.Sprintf("<@%s>, reminding you %s.", who, toRemind))
 				rowsToDelete = append(rowsToDelete, id)
+				if err != nil {
+					fmt.Println(err)
+				}
 			}
 		}
 		rows.Close()
