@@ -174,7 +174,7 @@ func handleAbsoluteRegexMatch(session *discordgo.Session, message *discordgo.Mes
 	session.ChannelMessageSendReply(
 		message.ChannelID,
 		strings.Replace(
-			fmt.Sprintf("Successfully added to the database. I'll remind %s you on %02d.%02d.%d at %02d:%02d %s in the %s timezone.",
+			fmt.Sprintf("Successfully added to the database. I'll remind you %s on %02d.%02d.%d at %02d:%02d %s in the %s timezone.",
 				toRemind, day, month, year, hour, minute, period, location.String()),
 			" my ", " your ", -1,
 		),
